@@ -1,7 +1,13 @@
 import time
 import numpy as np
+import pandas as pd
 from query_processor import QueryProcessor, SchedulingStrategy, benchmark_queries, handle_multiple_queries
 
+df = pd.read_csv("10k.csv")
+
+documents = df["text"].to_list()
+
+"""
 # test data/doc TODO: need to pull from twitter db
 documents = [
     "Breaking news: Major earthquake hits California",
@@ -15,6 +21,7 @@ documents = [
     "Science: Mars mission successful",
     "Travel: New airline routes announced"
 ] * 100  # testing
+"""
 
 # Sample queries
 queries = [
