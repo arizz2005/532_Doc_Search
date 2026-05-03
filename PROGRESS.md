@@ -8,11 +8,11 @@
 - [x] LRU Caching (Ping)
 - [x] Performance Metrics 
 - [x] Benchmarking Framework 
+- [x] Database Setup & Integration
+- [x] Real Twitter Dataset Integration
 
 ## Remaining ⏳
 
-- [ ] Database Setup & Integration
-- [ ] Real Twitter Dataset Integration
 - [ ] Scalability Testing (10K, 100K, 1M documents)
 - [ ] Cache Optimization
 - [ ] Distributed Processing Testing
