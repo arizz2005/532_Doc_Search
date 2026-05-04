@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from query_processor import QueryProcessor, SchedulingStrategy, benchmark_queries, handle_multiple_queries
 
-df = pd.read_csv("10k.csv")
+df = pd.read_csv("1M.csv")
 
 documents = df["text"].to_list()
 
@@ -14,7 +14,7 @@ documents = [
     "Weather update: Heavy rain expected tomorrow",
     "Sports: Team wins championship game",
     "Technology: New AI breakthrough announced",
-    "Politics: Election results declared",
+    "Politics: Election results declared",4
     "Economy: Stock market reaches new high",
     "Health: New vaccine approved",
     "Entertainment: Movie breaks box office records",
@@ -23,18 +23,18 @@ documents = [
 ] * 100  # testing
 """
 
-# Sample queries
+# Sample queries tuned for the tweet/news dataset
 queries = [
-    "earthquake news",
-    "weather forecast",
-    "sports championship",
-    "AI technology",
-    "election results",
-    "stock market",
-    "vaccine health",
-    "movie entertainment",
-    "Mars science",
-    "airline travel"
+    "Croatia Schengen euro",
+    "UK enters 2023 live",
+    "predatory rent inflation housing",
+    "NewYearsDay London Dublin Lisbon",
+    "pop up camper ATV UTV",
+    "Cristiano Ronaldo Happy New Year",
+    "Emory University researcher fraud",
+    "stock market crash recession",
+    "global crash news",
+    "industry news latest PR"
 ] * 10  # Multiple queries
 
 def run_experiments():

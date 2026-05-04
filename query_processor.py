@@ -7,10 +7,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pyspark.sql import SparkSession
-from pyspark.ml.feature import HashingTF, IDF, Tokenizer
-from pyspark.ml.linalg import Vectors
-from pyspark.sql.functions import udf
-from pyspark.sql.types import ArrayType, FloatType
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer, Normalizer, BucketedRandomProjectionLSH
+from pyspark.storagelevel import StorageLevel
+from pyspark.sql.functions import col, expr, row_number
+from pyspark.sql.window import Window
 from collections import OrderedDict
 
 class SchedulingStrategy(Enum):
@@ -40,7 +40,19 @@ class QueryProcessor:
         self.documents = documents
         self.use_spark = use_spark
         if use_spark:
-            self.spark = SparkSession.builder.master("local[*]").appName("DocumentSearch").getOrCreate()
+            self.spark = (
+                SparkSession.builder.master("local[*]")
+                .appName("DocumentSearch")
+                .config("spark.driver.memory", "8g")
+                .config("spark.executor.memory", "8g")
+                .config("spark.sql.shuffle.partitions", "8")
+                .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+                .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+                .config("spark.sql.adaptive.enabled", "true")
+                .getOrCreate()
+            )
+            self.tokenizer = Tokenizer(inputCol="text", outputCol="words")
+            self.hashingTF = HashingTF(inputCol="words", outputCol="rawFeatures", numFeatures=1000)
             self.doc_embeddings, self.idfModel = self._compute_embeddings_spark()
         else:
             self.vectorizer = TfidfVectorizer()
@@ -60,68 +72,135 @@ class QueryProcessor:
 
     def _compute_embeddings_spark(self):
         df = self.spark.createDataFrame([(i, doc) for i, doc in enumerate(self.documents)], ["id", "text"])
-        # Tokenize text
-        tokenizer = Tokenizer(inputCol="text", outputCol="words")
-        wordsData = tokenizer.transform(df)
-        # TF-IDF
-        hashingTF = HashingTF(inputCol="words", outputCol="rawFeatures", numFeatures=1000)
-        featurizedData = hashingTF.transform(wordsData)
+        wordsData = self.tokenizer.transform(df)
+        featurizedData = self.hashingTF.transform(wordsData)
         idf = IDF(inputCol="rawFeatures", outputCol="features")
         idfModel = idf.fit(featurizedData)
         rescaledData = idfModel.transform(featurizedData)
-        return rescaledData.select("id", "features"), idfModel
+        normalizer = Normalizer(inputCol="features", outputCol="norm_features", p=2.0)
+        normalizedDocs = normalizer.transform(rescaledData).select("id", "features", "norm_features")
+        self.lshModel = BucketedRandomProjectionLSH(
+            inputCol="norm_features",
+            outputCol="hashes",
+            numHashTables=4,
+            bucketLength=1.0
+        ).fit(normalizedDocs)
+        doc_embeddings = self.lshModel.transform(normalizedDocs).select("id", "features", "norm_features")
+        doc_embeddings = doc_embeddings.persist(StorageLevel.MEMORY_AND_DISK)
+        return doc_embeddings, idfModel
 
     def _process_queries(self):
         while not self.stop_event.is_set() or not self.query_queue.empty():
             try:
-                if self.scheduling_strategy == SchedulingStrategy.FIFO:
-                    query_id, query = self.query_queue.get(timeout=0.5)
-                else:
-                    priority, query_id, query = self.query_queue.get(timeout=0.5)
+                item = self.query_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
-            # Process the query
-            result = self._search(query)
-            with self.lock:
-                self.results[query_id] = result
-            self.query_queue.task_done()
+            if self.scheduling_strategy == SchedulingStrategy.FIFO:
+                query_items = [(item[0], item[1])]
+            else:
+                # PriorityQueue stores tuples as (priority, query_id, query)
+                query_items = [(item[1], item[2])]
+
+            if self.use_spark:
+                while True:
+                    try:
+                        next_item = self.query_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if self.scheduling_strategy == SchedulingStrategy.FIFO:
+                        query_items.append((next_item[0], next_item[1]))
+                    else:
+                        query_items.append((next_item[1], next_item[2]))
+
+                batch_results = self._search_spark_batch(query_items)
+                for query_id, result in batch_results.items():
+                    with self.lock:
+                        self.results[query_id] = result
+                for _ in query_items:
+                    self.query_queue.task_done()
+            else:
+                query_id, query = query_items[0]
+                result = self._search(query)
+                with self.lock:
+                    self.results[query_id] = result
+                self.query_queue.task_done()
 
     def _search(self, query):
         if self.use_cache:
             cached_result = self.cache.get(query)
             if cached_result is not None:
                 return cached_result
-        
-        if self.use_spark:
-            result = self._search_spark(query)
-        else:
-            query_vec = self.vectorizer.transform([query])
-            similarities = cosine_similarity(query_vec, self.doc_embeddings)[0]
-            top_indices = np.argsort(similarities)[-5:][::-1]  # Top 5
-            result = [(self.documents[i], similarities[i]) for i in top_indices]
-        
+
+        query_vec = self.vectorizer.transform([query])
+        similarities = cosine_similarity(query_vec, self.doc_embeddings)[0]
+        top_indices = np.argsort(similarities)[-5:][::-1]  # Top 5
+        result = [(self.documents[i], similarities[i]) for i in top_indices]
+
         if self.use_cache:
             self.cache.put(query, result)
-        
+
         return result
 
-    def _search_spark(self, query):
-        query_df = self.spark.createDataFrame([(query,)], ["text"])
-        tokenizer = Tokenizer(inputCol="text", outputCol="words")
-        wordsQuery = tokenizer.transform(query_df)
-        hashingTF = HashingTF(inputCol="words", outputCol="rawFeatures", numFeatures=1000)
-        featurizedQuery = hashingTF.transform(wordsQuery)
+    def _search_spark_batch(self, query_items):
+        if not query_items:
+            return {}
+
+        batch_results = {}
+        queries_to_process = []
+        if self.use_cache:
+            for query_id, query in query_items:
+                cached_result = self.cache.get(query)
+                if cached_result is not None:
+                    batch_results[query_id] = cached_result
+                else:
+                    queries_to_process.append((query_id, query))
+        else:
+            queries_to_process = query_items
+
+        if not queries_to_process:
+            return batch_results
+
+        query_rows = [(query_id, query) for query_id, query in queries_to_process]
+        query_df = self.spark.createDataFrame(query_rows, ["query_id", "text"])
+        wordsQuery = self.tokenizer.transform(query_df)
+        featurizedQuery = self.hashingTF.transform(wordsQuery)
         rescaledQuery = self.idfModel.transform(featurizedQuery)
-        query_vec = rescaledQuery.select("features").collect()[0][0]
-        
-        def cosine_sim(vec):
-            return float(Vectors.dense(vec).dot(Vectors.dense(query_vec)) / (Vectors.dense(vec).norm(2) * Vectors.dense(query_vec).norm(2)))
-        
-        cosine_udf = udf(cosine_sim, FloatType())
-        similarities_df = self.doc_embeddings.withColumn("similarity", cosine_udf("features"))
-        top_results = similarities_df.orderBy("similarity", ascending=False).limit(5).collect()
-        return [(self.documents[row["id"]], row["similarity"]) for row in top_results]
+        normalizer = Normalizer(inputCol="features", outputCol="norm_features", p=2.0)
+        query_vectors = normalizer.transform(rescaledQuery).select("query_id", "features", "norm_features")
+
+        similarity_join = self.lshModel.approxSimilarityJoin(
+            query_vectors,
+            self.doc_embeddings,
+            2.0,
+            distCol="dist"
+        )
+
+        top_candidates = similarity_join.select(
+            col("datasetA.query_id").alias("query_id"),
+            col("datasetB.id").alias("doc_id"),
+            col("dist")
+        ).withColumn(
+            "similarity",
+            expr("1 - dist * dist / 2")
+        )
+
+        window_spec = Window.partitionBy("query_id").orderBy(col("similarity").desc())
+        top_df = top_candidates.withColumn("rank", row_number().over(window_spec)).filter(col("rank") <= 5)
+
+        top_results = top_df.select("query_id", "doc_id", "similarity").collect()
+        for row in top_results:
+            batch_results.setdefault(row["query_id"], []).append((self.documents[row["doc_id"]], row["similarity"]))
+
+        if self.use_cache:
+            for query_id, query in queries_to_process:
+                if query_id in batch_results:
+                    self.cache.put(query, batch_results[query_id])
+
+        return batch_results
+
+    def _search_spark(self, query):
+        return self._search_spark_batch([(None, query)]).get(None, [])
 
     def submit_query(self, query_id, query, priority=0):
         if self.scheduling_strategy == SchedulingStrategy.FIFO:
