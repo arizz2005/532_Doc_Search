@@ -1,7 +1,7 @@
 # Benchmark Results
 
 ## Overview
-This document summarizes the benchmark results for the multi-query processing experiments run on both the `10k.csv` and `100k.csv` datasets.
+This document summarizes the benchmark results for the multi-query processing experiments run on both the 3 sizes datasets.
 
 ## Dataset: 10k.csv
 
@@ -45,9 +45,23 @@ This document summarizes the benchmark results for the multi-query processing ex
 - Distributed (Spark) - Average Latency: `0.0620` seconds per query
 - Distributed (Spark) - Average Throughput: `190,662.36` queries per second
 
----
+## Dataset: 1M.csv
 
-## Notes
-- Caching dramatically reduces latency, especially in single-node execution, and substantially increases throughput when query repetition is present.
-- On both datasets, the distributed Spark path remains slower in latency than single-node processing for this benchmark, though throughput remains comparable.
-- The benchmark uses CSV tweet/news data and measures end-to-end query processing including query scheduling, embedding, and similarity search.
+### Experiment 1: Scheduling Strategies (No Cache)
+- FIFO - Average Latency: `0.1154` seconds per query
+- FIFO - Average Throughput: `135752.77` queries per second
+- Priority - Average Latency: `0.1150` seconds per query
+- Priority - Average Throughput: `134936.95` queries per second
+
+### Experiment 2: Impact of Caching
+- No Cache - Average Latency: `0.1150` seconds per query
+- No Cache - Average Throughput: `152828.60` queries per second
+- With Cache - Average Latency: `0.0116` seconds per query
+- With Cache - Average Throughput: `207890.88` queries per second
+
+### Experiment 3: Single-node vs Distributed Processing
+- Single-node - Average Latency: `0.1162` seconds per query
+- Single-node - Average Throughput: `139584.56` queries per second
+- Distributed (Spark) - Average Latency: `0.0175` seconds per query
+- Distributed (Spark) - Average Throughput: `211058.67` queries per second
+
