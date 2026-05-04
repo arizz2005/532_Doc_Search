@@ -3,6 +3,10 @@
 ## Overview
 This document summarizes the benchmark results for the multi-query processing experiments run on both the 3 sizes datasets.
 
+CPU per task = 64
+mem: 100G 
+GPU: 1 A100 
+
 ## Dataset: 10k.csv
 
 ### Experiment 1: Scheduling Strategies (No Cache)
